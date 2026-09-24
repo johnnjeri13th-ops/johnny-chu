@@ -4,6 +4,7 @@ import { useEffect, useCallback } from 'react';
 import { toast } from 'sonner';
 import { useActiveSymbols, useTicks } from '@deriv/core';
 import type { DerivWS, ActiveSymbol, Tick, DurationLimits, ContractInfo } from '@deriv/core';
+import { useAppTranslations } from '@/components/custom/i18n-provider';
 import { useOpenPositions, type OpenPosition } from './use-open-positions';
 import { useClosedPositions, type ClosedPosition } from './use-closed-positions';
 import { useSellContract } from './use-sell-contract';
@@ -61,6 +62,8 @@ export function useBaseTrading({
   onAuthWSFailed,
   contractTypes,
 }: UseBaseTradingParams): UseBaseTradingReturn {
+  const { localize } = useAppTranslations();
+
   // When the authenticated WS exhausts all reconnect attempts, fall back to
   // the public WS by triggering logout.
   useEffect(() => {
@@ -91,11 +94,24 @@ export function useBaseTrading({
       const msgType = data.msg_type as string | undefined;
       if (msgType === 'buy' || msgType === 'sell') return;
       const err = data.error as Record<string, string>;
-      toast.error('Error', {
-        description: err.message ?? 'Unexpected error occurred. Please try again.',
+      // A duplicate subscription is an internal stream-lifecycle event that the
+      // subscription layer recovers from on its own, so it is a developer
+      // signal rather than an app error. Matched on the code only — the message
+      // is server-localized and interpolates the symbol.
+      if (err.code === 'AlreadySubscribed') {
+        console.warn('[useBaseTrading] duplicate subscription reported by the API', {
+          code: err.code,
+          msgType,
+          message: err.message,
+        });
+        return;
+      }
+      toast.error(localize('Error'), {
+        // API message when present; app-authored fallback otherwise.
+        description: err.message ?? localize('Unexpected error occurred. Please try again.'),
       });
     });
-  }, [ws, isConnected]);
+  }, [ws, isConnected, localize]);
 
   const { positions: openPositions } = useOpenPositions(ws, isConnected, isAuthenticated);
 

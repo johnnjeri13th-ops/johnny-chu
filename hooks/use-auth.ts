@@ -21,14 +21,23 @@ import {
   resolveReferralViaProxy,
 } from '@deriv/core';
 import type { AuthInfo, DerivAccount, AuthState, AuthConfig } from '@deriv/core';
+import { useAppTranslations } from '@/components/custom/i18n-provider';
+import { readStoredLanguage } from '@/lib/i18n';
 
-function getAuthConfig(): AuthConfig {
+function getAuthConfig(lang?: string): AuthConfig {
   const config: AuthConfig = {
     clientId: process.env.NEXT_PUBLIC_DERIV_APP_ID ?? '',
     redirectUri:
       process.env.NEXT_PUBLIC_DERIV_REDIRECT_URI ??
       (typeof window !== 'undefined' ? window.location.origin : ''),
   };
+
+  // Prefer the live UI language; fall back to the namespaced storage key so
+  // login/sign-up still forward `lang` if called outside the provider tree.
+  const resolvedLang = lang ?? readStoredLanguage();
+  if (resolvedLang) {
+    config.lang = resolvedLang;
+  }
 
   // Convert comma-separated scopes to space-separated (OAuth spec)
   const scopesEnv = process.env.NEXT_PUBLIC_DERIV_OAUTH_SCOPES ?? '';
@@ -73,16 +82,33 @@ function getAuthConfig(): AuthConfig {
   return config;
 }
 
+// Start the Scaleo referral resolution ahead of a login/sign-up activation.
+// The login prompt calls this when it opens, so by the time the user taps a
+// CTA the lookup has settled and the click path goes straight to the PKCE
+// build and navigation — the same synchronous shape as Trader's
+// redirectToLogin, whose crypto-only double-tap window Trader accepts with no
+// guard. Consumed (cleared) on use, so a login with no fresh prefetch — the
+// header buttons — resolves its own exactly as before.
+let pendingReferral: ReturnType<typeof resolveReferralViaProxy> | null = null;
+
+export function prefetchAuthReferral(): void {
+  const referralLink = process.env.NEXT_PUBLIC_DERIV_REFERRAL_LINK ?? '';
+  if (!referralLink) return;
+  pendingReferral = resolveReferralViaProxy(referralLink);
+}
+
 // Build the auth config and, if we don't already have an affiliate token (from
 // a resolved/Format-3 referral link or live landing params), try to resolve a
 // fresh per-user token via the app-builder BFF proxy. Strictly non-blocking:
 // any failure leaves the config untouched so login/sign-up always proceeds.
-async function getAuthConfigWithReferral(): Promise<AuthConfig> {
-  const config = getAuthConfig();
+async function getAuthConfigWithReferral(lang?: string): Promise<AuthConfig> {
+  const config = getAuthConfig(lang);
   if (!config.affiliateToken) {
     try {
       const referralLink = process.env.NEXT_PUBLIC_DERIV_REFERRAL_LINK ?? '';
-      const resolved = await resolveReferralViaProxy(referralLink);
+      const pending = pendingReferral ?? resolveReferralViaProxy(referralLink);
+      pendingReferral = null;
+      const resolved = await pending;
       if (resolved) {
         config.affiliateToken = resolved.affiliateToken;
         config.affiliateTokenParam = resolved.affiliateTokenParam;
@@ -112,6 +138,7 @@ export interface UseAuthReturn {
 }
 
 export function useAuth(): UseAuthReturn {
+  const { currentLang } = useAppTranslations();
   const [authState, setAuthState] = useState<AuthState>(() =>
     typeof window !== 'undefined' && getAuthInfo() ? 'authenticated' : 'unauthenticated'
   );
@@ -300,14 +327,15 @@ export function useAuth(): UseAuthReturn {
 
   // Phase 1: Initiate login — includes partner attribution params, resolving a
   // fresh per-user Scaleo token via the BFF proxy when needed (non-blocking).
+  // Forwards `lang` so Deriv's home app continues in the selected language (#559).
   const login = useCallback(async () => {
-    await initiateLogin(await getAuthConfigWithReferral());
-  }, []);
+    await initiateLogin(await getAuthConfigWithReferral(currentLang));
+  }, [currentLang]);
 
   // Initiate sign-up — adds prompt=registration and partner attribution params
   const signUp = useCallback(async () => {
-    await initiateSignUp(await getAuthConfigWithReferral());
-  }, []);
+    await initiateSignUp(await getAuthConfigWithReferral(currentLang));
+  }, [currentLang]);
 
   // Logout: close WS (handled by useDerivWS cleanup), clear storage, reset state
   const logout = useCallback(() => {
